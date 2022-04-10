@@ -5,9 +5,89 @@
 #include <stdio.h>
 #include <iostream>
 #include <fstream>
+#include <string>
 #include <chrono>
 #include <ctime>  
 //#include <Eigen/dense>
+
+struct Vector3f
+{
+	float x;
+	float y;
+	float z;
+
+	Vector3f(){}
+
+	Vector3f(float x, float y, float z)
+	{
+		this->x = x;
+		this->y = y;
+		this->z = z;
+	}
+};
+
+struct Vector3i
+{
+	int x;
+	int y;
+	int z;
+};
+
+struct TriangleMesh
+{
+	int numOfVerts = 0;
+	int numOfTris = 0;
+	Vector3f* verts = nullptr;
+	Vector3i* tris = nullptr;
+};
+
+static void parseOBJFile(const std::string filePath, TriangleMesh* triMesh)
+{
+	std::ifstream stream(filePath);
+
+	std::string line;
+
+	int vert_iterator = 0;
+	int tris_iterator = 0;
+
+	while (getline(stream, line, ' '))
+	{
+		if (line == "v") //v x y z
+		{
+			Vector3f vertex;
+			getline(stream, line, ' ');
+			vertex.x = std::stof(line);
+			getline(stream, line, ' ');
+			vertex.y = std::stof(line);
+			getline(stream, line, '\n');
+			vertex.z = std::stof(line);
+
+			*(triMesh->verts + vert_iterator++) = vertex;
+			continue;
+		}
+		if (line == "f") //f  v1/vt1/vn1 ..
+		{
+			Vector3i face;
+			getline(stream, line, '/');
+			face.x = std::stoi(line);
+			getline(stream, line, ' ');
+			getline(stream, line, '/');
+			face.y = std::stoi(line);
+			getline(stream, line, ' ');
+			getline(stream, line, '/');
+			face.z = std::stoi(line);
+
+			*(triMesh->tris + tris_iterator++) = face;
+		}
+		getline(stream, line, '\n');
+	}
+
+	triMesh->numOfVerts = vert_iterator;
+	triMesh->numOfTris = tris_iterator;
+
+
+	stream.close();
+}
 
 struct pixel
 {
@@ -18,21 +98,39 @@ struct pixel
 
 __global__ void shadePixels(pixel* p)
 {
-	int x = threadIdx.x;
-	int y = blockIdx.x;
+	int pixel_x = threadIdx.x;
+	int pixel_y = blockIdx.x;
 
 	//pixels are stored colunm/block num by row/thread offset
 	//-----------------------------
 	//---------------x-------------
 	//-----------------------------
-	int offset = (y * blockDim.x) + x;
+	p = p + (pixel_y * blockDim.x) + pixel_x;
+
+	//set the film size
+	const float image_plane_width = 0.07f; // 7cm
+	const float image_plane_height = 0.06f; //6cm
+
+	//find this pixels camera space position
+	Vector3f pixelpos;
+	pixelpos.x = (float) pixel_x / blockDim.x;
+	pixelpos.x = pixelpos.x * image_plane_width - (image_plane_width / 2.0f);
+	pixelpos.y = (float) pixel_y / gridDim.x;
+	pixelpos.y = -pixelpos.y * image_plane_height + (image_plane_height / 2.0f);
+	pixelpos.z = 0.f;
+
+	//select a focal length
+	const float focal_length = 0.05f;
+
+	//Set V and W ... TODO add lens configurations
+	Vector3f V = Vector3f(0.f, 0.f, focal_length);
+	Vector3f W = Vector3f(pixelpos.x, pixelpos.y, -focal_length);
 
 	float r = 1.f - (float)y / gridDim.x;
 	float g = 1.f - (float)x / blockDim.x;
 	float b = 0.25f;
 
-	p = p + offset;
-
+	//Set the final color
 	p->r = r * 255;
 	p->g = g * 255;
 	p->b = b * 255;
@@ -48,6 +146,14 @@ int main()
 	pixel* pixels;
 
 	cudaMallocManaged(&pixels, sizeof(pixel) * image_width * image_height);
+
+	//Read in Triangle information from OBJ file
+	TriangleMesh* trimesh;
+	cudaMallocManaged(&trimesh, sizeof(TriangleMesh));
+	cudaMallocManaged(&trimesh->verts, sizeof(Vector3f) * 1000);
+	cudaMallocManaged(&trimesh->tris, sizeof(Vector3i) * 1000);
+
+	parseOBJFile("res/mnky.obj", trimesh);
 
 	auto start_p1 = std::chrono::system_clock::now();
 
