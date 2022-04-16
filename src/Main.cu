@@ -1,5 +1,3 @@
-#pragma once
-
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 #include <stdio.h>
@@ -7,24 +5,9 @@
 #include <fstream>
 #include <string>
 #include <chrono>
-#include <ctime>  
+#include <ctime>
 //#include <Eigen/dense>
-
-struct Vector3f
-{
-	float x;
-	float y;
-	float z;
-
-	Vector3f(){}
-
-	Vector3f(float x, float y, float z)
-	{
-		this->x = x;
-		this->y = y;
-		this->z = z;
-	}
-};
+#include "Vector3f.h"
 
 struct Vector3i
 {
@@ -111,7 +94,12 @@ __global__ void shadePixels(pixel* p)
 	const float image_plane_width = 0.07f; // 7cm
 	const float image_plane_height = 0.06f; //6cm
 
-	//find this pixels camera space position
+	//calculate pixel area to sample over (coordinates begin at the top left of each pixel)
+	const float pixel_width = image_plane_width / blockDim.x;
+
+	//this is where pixel sample points should be generated, before conversion to camera space
+
+	//find this pixel's camera space position
 	Vector3f pixelpos;
 	pixelpos.x = (float) pixel_x / blockDim.x;
 	pixelpos.x = pixelpos.x * image_plane_width - (image_plane_width / 2.0f);
@@ -119,21 +107,25 @@ __global__ void shadePixels(pixel* p)
 	pixelpos.y = -pixelpos.y * image_plane_height + (image_plane_height / 2.0f);
 	pixelpos.z = 0.f;
 
-	//select a focal length
+	//select a focal length, aperature, and focus distance
 	const float focal_length = 0.05f;
+	const float aperture = 16.0f;
+	const float focus_dist = 3.f;
 
 	//Set V and W ... TODO add lens configurations
 	Vector3f V = Vector3f(0.f, 0.f, focal_length);
-	Vector3f W = Vector3f(pixelpos.x, pixelpos.y, -focal_length);
+	Vector3f W = Vector3f(V.x + pixelpos.x,  V.y + pixelpos.y, -1.f * V.z);
 
-	float r = 1.f - (float)y / gridDim.x;
-	float g = 1.f - (float)x / blockDim.x;
-	float b = 0.25f;
+	//set the background color
+	Vector3f color = Vector3f(0.2f, 0.3f, 0.4f);
+
+	// TEMP DEFINE SPHERE DATA
+	sph
 
 	//Set the final color
-	p->r = r * 255;
-	p->g = g * 255;
-	p->b = b * 255;
+	p->r *= 255;
+	p->g *= 255;
+	p->b *= 255;
 
 }
 
@@ -147,13 +139,19 @@ int main()
 
 	cudaMallocManaged(&pixels, sizeof(pixel) * image_width * image_height);
 
+	/*
 	//Read in Triangle information from OBJ file
 	TriangleMesh* trimesh;
 	cudaMallocManaged(&trimesh, sizeof(TriangleMesh));
 	cudaMallocManaged(&trimesh->verts, sizeof(Vector3f) * 1000);
 	cudaMallocManaged(&trimesh->tris, sizeof(Vector3i) * 1000);
 
-	parseOBJFile("res/mnky.obj", trimesh);
+	parseOBJFile("in/mnky.obj", trimesh);
+	*/
+
+	//Create lights, for now a light is a point
+
+	//Create spheres, a point and a radius
 
 	auto start_p1 = std::chrono::system_clock::now();
 
@@ -195,6 +193,9 @@ int main()
 
 	//clean up
 	image_of.close();
+	cudaFree(trimesh->verts);
+	cudaFree(trimesh->tris);
+	cudaFree(trimesh);
 	cudaFree(pixels);
 	cudaDeviceReset();
 

@@ -1,0 +1,108 @@
+Define an image plane as the physical height and width of the "film"
+in the theoretical raytracing space.
+
+lets say 7x6cm (x,y)
+
+Define the image size as the digital size in pixels of the image output
+
+lets say 1024 x 878
+
+Now we need to use a function to determine where a pixel is on the 
+image plane. This transformation can be called transforming to camera
+space.
+
+given (pixel.x, pixel.y) -> (imageplane.x, imageplane.y)
+
+pixel.x / image size width = ratio
+
+ratio * imageplane width = x coordinate value (left to right)
+
+Since the coordinates of the imageplane are mapped from the center
+a transformation needs to be applied
+
+x = x - imageplane width / 2
+
+Since pixel arranged vertially are mapped from top to bottom, y 
+coordinates require an additional transformation
+
+y = -1 * (y - imageplane width / 2)
+
+Define a pixel as 2 vector3f, an rgb, and an xyz
+
+Before we can send pixels to the GPU to be shaded we need to determine
+how many blocks and threads will be required.
+
+Max threads per SM = 1024
+
+Max blocks per SM = 32
+
+Warp size = 32
+
+This can be further tested but lets say 
+
+(image size width / image size height) / 1024 = 878
+
+This should maximize the usage of each SM.
+
+Since we are launching in a configuration, it is not necessary
+to know the pixel coordinate before we send it to the GPU 
+as it is implicit in 
+
+block[i] = y coordinate
+thread[i] = x coordiate
+
+we only need to allocate space for this to be stored later along
+with the color values.
+
+To calculate the pixel size we divide the image plane width by the 
+number of pixels which fill it.
+(note that the coordinates remain at the top left of the pixel)
+
+Parsing the OBJ --
+
+Read in a line as a string
+break up the line by spaces
+check the first index to determine how to read the rest of the line
+continue until the end of the file is reached
+
+Creating the camera --
+
+Define focal length as the distance from the film to the point of focus,
+(where all light converges from the lens before flipping and diverging
+to the image plane)
+
+Define aperture as a ratio of the focal length to the lens opening. eg.
+focal length / diameter of opening = f_number ... or
+focal length / f_number = diameter of the opening
+
+Define circle of confusion as the diameter of the circle which is
+produced when light is focused by a lens. (rays cone out from the
+focal point)
+
+When the circle of confusion produced by size of the aperture relative
+to the distance of the object from the lens is bigger than the size
+of a pixel a blur is produced.
+
+Define the focal plane as the plane in which points are perfectly 
+in focus.
+
+Define focus distance as the distance from the lens to the focal plane.
+
+To create the depth of field effect points can be sampled over the
+diameter of the lens of openening, in other words a disc. Rays are
+then shot towards towards the focal point, a point which is calculated
+as V + ((focus distance-fl) * primary ray direction),
+and don't forget to normalize the new direction.
+
+Define shutter speed as the duration of time for which pixels
+will be sampled.
+
+To create the effect of motion blur samples can be taken over a
+discrete interval of time.
+
+Define ISO as the amount of light which is sampled. (this should
+be better parameterized)
+
+To create the affect of exposure ISO film speed can be represented
+by a fraction which when multiplied by the f_number determines
+the intensity of the light which has been sampled
