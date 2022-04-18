@@ -12,11 +12,12 @@
 #include "GLM/glm/geometric.hpp"
 //#include "GLM/glm/common.hpp"
 
-struct Vector3i
+struct Vector4i
 {
 	int x;
 	int y;
 	int z;
+	int vn1;
 };
 
 struct TriangleMesh
@@ -24,7 +25,8 @@ struct TriangleMesh
 	int numOfVerts = 0;
 	int numOfTris = 0;
 	glm::vec3* verts = nullptr;
-	Vector3i* tris = nullptr;
+	glm::vec3* vnorms = nullptr;
+	Vector4i* tris = nullptr;
 };
 
 static void parseOBJFile(const std::string filePath, TriangleMesh* triMesh)
@@ -35,6 +37,7 @@ static void parseOBJFile(const std::string filePath, TriangleMesh* triMesh)
 
 	int vert_iterator = 0;
 	int tris_iterator = 0;
+	int vnorm_iterator = 0;
 
 	while (getline(stream, line, ' '))
 	{
@@ -51,11 +54,26 @@ static void parseOBJFile(const std::string filePath, TriangleMesh* triMesh)
 			*(triMesh->verts + vert_iterator++) = vertex;
 			continue;
 		}
+		if (line.compare("vn") == 0)
+		{
+			glm::vec3 vnorm;
+			getline(stream, line, ' ');
+			vnorm.x = std::stof(line);
+			getline(stream, line, ' ');
+			vnorm.y = std::stof(line);
+			getline(stream, line, '\n');
+			vnorm.z = std::stof(line);
+
+			*(triMesh->vnorms + vnorm_iterator++) = vnorm;
+			continue;
+		}
 		if (line == "f") //f  v1/vt1/vn1 ..
 		{
-			Vector3i face;
+			Vector4i face;
 			getline(stream, line, '/');
 			face.x = std::stoi(line);
+			getline(stream, line, '/');
+			face.vn1 = std::stoi(line);
 			getline(stream, line, ' ');
 			getline(stream, line, '/');
 			face.y = std::stoi(line);
@@ -192,12 +210,12 @@ __device__ inline glm::vec3 shadeSphere(glm::vec3 P, glm::vec3 W, glm::vec3 N, s
 	return c;
 }*/
 
-__device__ glm::vec3 triangleTest(glm::vec3 V, glm::vec3 W, glm::vec3 a, glm::vec3 b, glm::vec3 c, material* m, pointLight* light, int num_lights)
+__device__ glm::vec3 triangleTest(glm::vec3 V, glm::vec3 W, glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 n, material* m, pointLight* light, int num_lights)
 {
 	glm::vec3 ba = a - b;
 	glm::vec3 bc = c - b;
-	glm::vec3 bPerp = cross(bc, ba); //plane normal
-	glm::vec3 n = normalize(bPerp);
+	//glm::vec3 bPerp = cross(bc, ba); //plane normal
+	//glm::vec3 n = normalize(bPerp);
 	float d = -dot(n, a);
 	glm::vec4 H = glm::vec4(n.x, n.y, n.z, d);
 
@@ -233,21 +251,21 @@ __device__ glm::vec3 triangleTest(glm::vec3 V, glm::vec3 W, glm::vec3 a, glm::ve
 
 		//TODO calculate the barycentric coordinates to apply smooth shading with vertex normals
 
-		return shadePoint(P, W, bPerp, m, light, num_lights);
-		//return glm::vec3(0.5f, 0.5f, 0.5f);		
+		return shadePoint(P, W, n, m, light, num_lights);		
 	}
 	return glm::vec3(0.);
 }
 
 /*Each vector in indicies contains the three points that make a triangle,
-points are indexes of vertex coordinates stored in the verticies array*//*
-__device__ inline glm::vec3 drawTriangles(glm::vec3 V, glm::vec3 W, TriangleMesh* trimesh, material m, pointLight* lights, int num_lights)
+points are indexes of vertex coordinates stored in the verticies array*/
+__device__ inline glm::vec3 drawTriangles(glm::vec3 V, glm::vec3 W, TriangleMesh* trimesh, material* m, pointLight* lights, int num_lights)
 {
 	//use indicies to draw triangles with vertex array
 	for (int i = 0; i < trimesh->numOfTris; i++)
 	{
-		glm::vec3 color = triangleTest(V, W, *(trimesh->verts + (trimesh->tris + i)->x), *(trimesh->verts + (trimesh->tris + i)->y), 
-			*(trimesh->verts + (trimesh->tris + i)->z), m, lights, num_lights);
+		//vertex indexes begin at 1 for obj files
+		glm::vec3 color = triangleTest(V, W, *(trimesh->verts + (trimesh->tris + i)->x - 1), *(trimesh->verts + (trimesh->tris + i)->y - 1),
+			*(trimesh->verts + (trimesh->tris + i)->z - 1), *(trimesh->vnorms + (trimesh->tris + i)->vn1 - 1), m, lights, num_lights);
 
 		if (dot(color, glm::vec3(1.f)) > 0.)
 		{
@@ -256,7 +274,7 @@ __device__ inline glm::vec3 drawTriangles(glm::vec3 V, glm::vec3 W, TriangleMesh
 	}
 
 	return glm::vec3(0.);
-}*/
+}
 
 /*
 __device__ inline glm::vec3 raySpheres(float tMin, glm::vec3 V, glm::vec3 W, sphere* spheres, int num_spheres, glm::vec3 color, material m, pointLight* lights, int num_lights)
@@ -323,10 +341,10 @@ __global__ void shadePixels(glm::vec3* p, TriangleMesh* trimesh)
 
 	//color = raySpheres(-1.f, V, W, &spheres[0], 3, color, sphere_mat, &lights[0], 1);
 
-	//color += drawTriangles(V, W, trimesh, sphere_mat, &lights[0], 1);
+	color += drawTriangles(V, W, trimesh, &sphere_mat, &light, 1);
 	//color += triangleTest(V, W, *(trimesh->verts + (trimesh->tris)->x), *(trimesh->verts + (trimesh->tris)->y),
 		//*(trimesh->verts + (trimesh->tris)->z), &sphere_mat, &light, 1);
-	color += triangleTest(V, W, glm::vec3(-0.1f, 0.0f, -1.f), glm::vec3(0.1f, 0.0f, -1.f), glm::vec3(0.f, 0.1f, -1.f), &sphere_mat, &light, 1);
+	//color += triangleTest(V, W, glm::vec3(-0.1f, 0.0f, -1.f), glm::vec3(0.1f, 0.0f, -1.f), glm::vec3(0.f, 0.1f, -1.f), &sphere_mat, &light, 1);
 
 	//Set the final color
 	p->r = color.x * 255;
@@ -349,11 +367,14 @@ int main()
 	//Read in Triangle information from OBJ file
 	TriangleMesh* trimesh;
 	glm::vec3* verts;
-	Vector3i* tris;
+	glm::vec3* vnorms;
+	Vector4i* tris;
 	cudaMallocManaged(&trimesh, sizeof(TriangleMesh));
 	cudaMallocManaged(&verts, sizeof(glm::vec3) * 1000);
-	cudaMallocManaged(&tris, sizeof(Vector3i) * 1000);
+	cudaMallocManaged(&vnorms, sizeof(glm::vec3) * 1000);
+	cudaMallocManaged(&tris, sizeof(Vector4i) * 1000);
 	trimesh->verts = verts;
+	trimesh->vnorms = vnorms;
 	trimesh->tris = tris;
 
 	auto start_p0 = std::chrono::system_clock::now();
@@ -403,6 +424,7 @@ int main()
 	//clean up
 	image_of.close();
 	cudaFree(trimesh->verts);
+	cudaFree(trimesh->vnorms);
 	cudaFree(trimesh->tris);
 	cudaFree(trimesh);
 	cudaFree(pixels);
