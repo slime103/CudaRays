@@ -71,6 +71,13 @@ Define focal length as the distance from the film to the point of focus,
 (where all light converges from the lens before flipping and diverging
 to the image plane)
 
+In a thin lens model the focal length is fixed, moving the lens
+towards or away from the image plane will bring the image into or out
+of focus.
+
+In a zoom lens more than one lens works together to change the focal
+length, which changes the field of view.
+
 Define aperture as a ratio of the focal length to the lens opening. eg.
 focal length / diameter of opening = f_number ... or
 focal length / f_number = diameter of the opening
@@ -91,7 +98,7 @@ Define focus distance as the distance from the lens to the focal plane.
 To create the depth of field effect points can be sampled over the
 diameter of the lens of openening, in other words a disc. Rays are
 then shot towards towards the focal point, a point which is calculated
-as V + ((focus distance-fl) * primary ray direction),
+as V + ((focus distance + fl) * primary ray direction),
 and don't forget to normalize the new direction.
 
 Define shutter speed as the duration of time for which pixels
