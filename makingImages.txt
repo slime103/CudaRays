@@ -96,7 +96,7 @@ in focus.
 Define focus distance as the distance from the lens to the focal plane.
 
 To create the depth of field effect points can be sampled over the
-diameter of the lens of openening, in other words a disc. Rays are
+diameter of the lens, in other words a disc. Rays are
 then shot towards towards the focal point, a point which is calculated
 as V + ((focus distance + fl) * primary ray direction),
 and don't forget to normalize the new direction.

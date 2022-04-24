@@ -73,8 +73,8 @@ static void parseOBJFile(const std::string filePath, TriangleMesh* triMesh)
 			getline(stream, line, '/');
 			face.x = std::stoi(line);
 			getline(stream, line, '/');
-			face.vn1 = std::stoi(line);
 			getline(stream, line, ' ');
+			face.vn1 = std::stoi(line);
 			getline(stream, line, '/');
 			face.y = std::stoi(line);
 			getline(stream, line, ' ');
@@ -163,8 +163,10 @@ __device__ inline float rayHalfspace(glm::vec3 V, glm::vec3 W, glm::vec4 H) {
 
 __device__ glm::vec3 shadePoint(glm::vec3 P, glm::vec3 W, glm::vec3 N, material* m, pointLight* lights, int num_lights)
 {
-	glm::vec3 c = m->ambient;
-	for (int l = 0; l < num_lights; l++) {
+	glm::vec3 c = glm::vec3(0.f);
+	for (int l = 0; l < num_lights; l++)
+	{
+		glm::vec3 contribution = glm::vec3(0.f);
 
 		//calculate the light direction from the point lamps
 		glm::vec3 Ld = (lights + l)->location - P;
@@ -173,57 +175,41 @@ __device__ glm::vec3 shadePoint(glm::vec3 P, glm::vec3 W, glm::vec3 N, material*
 		Ld = normalize(Ld);
 
 		// TODO: shadows for all surfaces
-		glm::vec3 Rd = 2.f * dot(N, Ld) * N - Ld;
-		c += (lights + l)->location *
-			m->diffuse * glm::max(0.f, dot(N, Ld));
-		c += m->specular * pow(glm::max(0.f, dot(Rd, -W)), m->power);
-		c *= (lights + l)->location / distance;
+		/*for (int i = 0; i < trimesh->numOfTris; i++)
+		{
+			//vertex indexes begin at 1 for obj files, thus the -1
+			float z = -1000.f;
+			glm::vec3 P = triangleTest((lights + l)->location, Ld, &z, *(trimesh->verts + (trimesh->tris + i)->x - 1), *(trimesh->verts + (trimesh->tris + i)->y - 1),
+				*(trimesh->verts + (trimesh->tris + i)->z - 1), *(trimesh->vnorms + (trimesh->tris + i)->vn1 - 1));
+
+			if (dot(P, glm::vec3(1.)) > 0.)
+			{
+				t = 1;
+				break;
+			}
+		}*/
+
+		glm::vec3 Rd = 2.f * N * dot(N, Ld) - Ld;
+		contribution += (lights + l)->color * m->diffuse * glm::max(0.f, dot(N, Ld));
+		contribution += m->specular * pow(glm::max(0.f, dot(Rd, -W)), m->power);
+		contribution *= (lights + l)->i / distance;
+		c += contribution;
 	}
 
-	return c;
+	return m->ambient + c;
+	//return glm::vec3(1.f);
 }
 
-/*
-__device__ inline glm::vec3 shadeSphere(glm::vec3 P, glm::vec3 W, glm::vec3 N, sphere* spheres, int num_spheres, material m, pointLight* lights, int num_lights) 
+__device__ glm::vec3 inline triangleTest(glm::vec3 V, glm::vec3 W, float* z, glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 N, material* m, pointLight* lights, int num_lights)
 {
-	glm::vec3 c = m.ambient;
-
-	for (int l = 0; l < num_lights; l++) {
-
-		// SPHERE SHADOWS
-
-		float t = -1.;
-		for (int n = 0; n < num_spheres; n++)
-			t = glm::max(t, raySphere(P, (lights+n)->location, *(spheres+n)));
-
-		// IF NOT, ADD LIGHTING FROM THIS LIGHT
-
-		if (t < 0.) 
-		{
-			glm::vec3 R = 2.f * dot(N, (lights + l)->location) * N - (lights + l)->location;
-			c += (lights + l)->location *
-				m.diffuse * glm::max(0.f, dot(N, (lights + l)->location));
-			c += m.specular * pow(glm::max(0.f, dot(R, -W)), m.power);
-		}
-	}
-
-	return c;
-}*/
-
-__device__ glm::vec3 triangleTest(glm::vec3 V, glm::vec3 W, glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 n, material* m, pointLight* light, int num_lights)
-{
-	glm::vec3 ba = a - b;
-	glm::vec3 bc = c - b;
-	//glm::vec3 bPerp = cross(bc, ba); //plane normal
-	//glm::vec3 n = normalize(bPerp);
-	float d = -dot(n, a);
-	glm::vec4 H = glm::vec4(n.x, n.y, n.z, d);
+	float d = -dot(N, a);
+	glm::vec4 H = glm::vec4(N.x, N.y, N.z, d);
 
 	//find t
 	float t = rayHalfspace(V, W, H);
 
 	//if t is positive we hit the plane infront of the camera
-	if (t > 0. && t < 1000.)
+	if (t > 0.f && t < 1000.f)
 	{
 		//calculate point p
 		glm::vec3 P = V + t * W;
@@ -231,49 +217,61 @@ __device__ glm::vec3 triangleTest(glm::vec3 V, glm::vec3 W, glm::vec3 a, glm::ve
 		//make sure p is within the edges
 		glm::vec3 ab = b - a;
 		glm::vec3 ap = P - a;
-		if (dot(cross(ab, ap), n) < 0.) // > 0 means inside, = 0 means on the edge
+		if (dot(cross(ab, ap), N) < 0.f) // > 0 means inside, = 0 means on the edge
 		{
-			return glm::vec3(0.);
+			return glm::vec3(0.f);
 		}
 
+		glm::vec3 bc = c - b;
 		glm::vec3 bp = P - b;
-		if (dot(cross(bc, bp), n) < 0.)
+		if (dot(cross(bc, bp), N) < 0.f)
 		{
-			return glm::vec3(0.);
+			return glm::vec3(0.f);
 		}
 
 		glm::vec3 ca = a - c;
 		glm::vec3 cp = P - c;
-		if (dot(cross(ca, cp), n) < 0.)
+		if (dot(cross(ca, cp), N) < 0.f)
 		{
-			return glm::vec3(0.);
+			return glm::vec3(0.f);
 		}
+
+		//if we are in the triangle, are we closer to the camera?
+		if (P.z < *z)
+		{
+			return glm::vec3(0.f);
+		}
+
+		//we are closest so update the z position
+		*z = P.z;
 
 		//TODO calculate the barycentric coordinates to apply smooth shading with vertex normals
 
-		return shadePoint(P, W, n, m, light, num_lights);		
+		return shadePoint(P, W, N, m, lights, num_lights);;
+		//return glm::vec3(1.f);
 	}
-	return glm::vec3(0.);
+	return glm::vec3(0.f);
 }
 
-/*Each vector in indicies contains the three points that make a triangle,
-points are indexes of vertex coordinates stored in the verticies array*/
-__device__ inline glm::vec3 drawTriangles(glm::vec3 V, glm::vec3 W, TriangleMesh* trimesh, material* m, pointLight* lights, int num_lights)
+/*Each vector of indicies contains the three indexes that make a triangle,
+indexes of vertex coordinates stored in the verticies array*/
+__device__ inline glm::vec3 drawTriangles(glm::vec3 V, glm::vec3 W, glm::vec3 color, float* z, TriangleMesh* trimesh, material* m, pointLight* lights, int num_lights)
 {
+	
 	//use indicies to draw triangles with vertex array
 	for (int i = 0; i < trimesh->numOfTris; i++)
 	{
-		//vertex indexes begin at 1 for obj files
-		glm::vec3 color = triangleTest(V, W, *(trimesh->verts + (trimesh->tris + i)->x - 1), *(trimesh->verts + (trimesh->tris + i)->y - 1),
+		//vertex indexes begin at 1 for obj files, thus the -1
+		glm::vec3 c = triangleTest(V, W, z, *(trimesh->verts + (trimesh->tris + i)->x - 1), *(trimesh->verts + (trimesh->tris + i)->y - 1),
 			*(trimesh->verts + (trimesh->tris + i)->z - 1), *(trimesh->vnorms + (trimesh->tris + i)->vn1 - 1), m, lights, num_lights);
 
-		if (dot(color, glm::vec3(1.f)) > 0.)
+		if (dot(c, glm::vec3(1.)) > 0.)
 		{
-			return color;
+			return c;
 		}
 	}
 
-	return glm::vec3(0.);
+	return color;
 }
 
 /*
@@ -305,7 +303,7 @@ __global__ void shadePixels(glm::vec3* p, TriangleMesh* trimesh)
 
 	//set the film size
 	const float image_plane_width = 0.07f; // 7cm
-	const float image_plane_height = 0.06f; //6cm
+	const float image_plane_height = 0.06f; // 6cm
 
 	//calculate pixel area to sample over (coordinates begin at the top left of each pixel)
 	//const float pixel_width = image_plane_width / blockDim.x;
@@ -321,35 +319,39 @@ __global__ void shadePixels(glm::vec3* p, TriangleMesh* trimesh)
 	pixelpos.z = 0.f;
 
 	//select a focal length, aperature, and focus distance
-	const float focal_length = 0.05f;
-	//const float aperture = 16.0f;
-	//const float focus_dist = 3.f;
+	const float focal_length = 0.05f; // 50mm
+	//const float aperture = 16.0f; // f16
+	//const float focus_dist = 3.f; // 3m
 
 	//Set V and W ... TODO add lens configurations
 	glm::vec3 V = glm::vec3(0.f, 0.f, focal_length);
 	glm::vec3 W = glm::vec3(V.x + pixelpos.x,  V.y + pixelpos.y, -1.f * V.z);
 
 	//set the background color
-	glm::vec3 color = glm::vec3(0.2f, 0.3f, 0.4f);
+	glm::vec3 color = glm::vec3(0.35f, 0.35f, 0.4f);
 
 	// TEMP DEFINE SPHERE DATA
 	//sphere spheres[3] = {sphere(0.f, 0.f, -5.f, 1.f), sphere(0.5f, 0.f, -3.f, 1.f), sphere(-0.5f, 0.f, -7.f, 1.f)};
 	// TEMP DEFINE LIGHT DATA
-	pointLight light = pointLight(0.f, 1.f, -.5f, .59f, .93f, .59f, 40.f);
+	const int num_lights = 2;
+	pointLight lights[num_lights] = { pointLight(0.5f, 3.5f, -5.5f, .59f, .93f, .59f, 25.f), pointLight(1.5f, -.5f, -1.5f, .19f, .63f, .49f, 15.f) };
 	// TEMP DEFINE MATERIAL DATA
 	material sphere_mat = material(0.1f, 0.1f, 0.1f, 0.2f, 0.4f, 0.5f, 1.f, 1.f, 1.f, 1.5f);
 
 	//color = raySpheres(-1.f, V, W, &spheres[0], 3, color, sphere_mat, &lights[0], 1);
 
-	color += drawTriangles(V, W, trimesh, &sphere_mat, &light, 1);
+	//only darw the point closest to the camera
+	float z = -1000.f; //far clip plane
+
+	color = drawTriangles(V, W, color, &z, trimesh, &sphere_mat, &lights[0], num_lights);
 	//color += triangleTest(V, W, *(trimesh->verts + (trimesh->tris)->x), *(trimesh->verts + (trimesh->tris)->y),
 		//*(trimesh->verts + (trimesh->tris)->z), &sphere_mat, &light, 1);
-	//color += triangleTest(V, W, glm::vec3(-0.1f, 0.0f, -1.f), glm::vec3(0.1f, 0.0f, -1.f), glm::vec3(0.f, 0.1f, -1.f), &sphere_mat, &light, 1);
+	//color += triangleTest(V, W, glm::vec3(-0.1f, 0.0f, -1.f), glm::vec3(0.1f, 0.0f, -1.f), glm::vec3(0.f, 0.1f, -1.f), glm::vec3(0.f, 0.f, 1.f), &sphere_mat, &light, 1);
 
 	//Set the final color
-	p->r = color.x * 255;
-	p->g = color.y * 255;
-	p->b = color.z * 255;
+	p->r = glm::clamp(color.x * 255.f, 0.f, 255.f);
+	p->g = glm::clamp(color.y * 255.f, 0.f, 255.f);
+	p->b = glm::clamp(color.z * 255.f, 0.f, 255.f);
 
 }
 
