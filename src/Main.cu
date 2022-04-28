@@ -200,7 +200,8 @@ __device__ glm::vec3 shadePoint(glm::vec3 P, glm::vec3 W, glm::vec3 N, material*
 	//return glm::vec3(1.f);
 }
 
-__device__ glm::vec3 inline triangleTest(glm::vec3 V, glm::vec3 W, float* z, glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 N, material* m, pointLight* lights, int num_lights)
+/* Return a point P if V, W intersects triangle ABC */
+__device__ bool inline triangleTest(glm::vec3 V, glm::vec3 W, glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 N, glm::vec3 &P)
 {
 	float d = -dot(N, a);
 	glm::vec4 H = glm::vec4(N.x, N.y, N.z, d);
@@ -212,63 +213,71 @@ __device__ glm::vec3 inline triangleTest(glm::vec3 V, glm::vec3 W, float* z, glm
 	if (t > 0.f && t < 1000.f)
 	{
 		//calculate point p
-		glm::vec3 P = V + t * W;
+		glm::vec3 p = V + t * W;
 
 		//make sure p is within the edges
 		glm::vec3 ab = b - a;
-		glm::vec3 ap = P - a;
+		glm::vec3 ap = p - a;
 		if (dot(cross(ab, ap), N) < 0.f) // > 0 means inside, = 0 means on the edge
 		{
-			return glm::vec3(0.f);
+			return false;
 		}
 
 		glm::vec3 bc = c - b;
-		glm::vec3 bp = P - b;
+		glm::vec3 bp = p - b;
 		if (dot(cross(bc, bp), N) < 0.f)
 		{
-			return glm::vec3(0.f);
+			return false;
 		}
 
 		glm::vec3 ca = a - c;
-		glm::vec3 cp = P - c;
+		glm::vec3 cp = p - c;
 		if (dot(cross(ca, cp), N) < 0.f)
 		{
-			return glm::vec3(0.f);
+			return false;
 		}
-
-		//if we are in the triangle, are we closer to the camera?
-		if (P.z < *z)
-		{
-			return glm::vec3(0.f);
-		}
-
-		//we are closest so update the z position
-		*z = P.z;
 
 		//TODO calculate the barycentric coordinates to apply smooth shading with vertex normals
 
-		return shadePoint(P, W, N, m, lights, num_lights);;
-		//return glm::vec3(1.f);
+		//set values
+		P = p;
+		return true;
 	}
-	return glm::vec3(0.f);
+	return false;
 }
 
 /*Each vector of indicies contains the three indexes that make a triangle,
 indexes of vertex coordinates stored in the verticies array*/
 __device__ inline glm::vec3 drawTriangles(glm::vec3 V, glm::vec3 W, glm::vec3 color, float* z, TriangleMesh* trimesh, material* m, pointLight* lights, int num_lights)
 {
-	
-	//use indicies to draw triangles with vertex array
+	glm::vec3 P;
+	glm::vec3 N;
+	bool hit = false;
+
+	//loop through all triangles in the scene
 	for (int i = 0; i < trimesh->numOfTris; i++)
 	{
 		//vertex indexes begin at 1 for obj files, thus the -1
-		glm::vec3 c = triangleTest(V, W, z, *(trimesh->verts + (trimesh->tris + i)->x - 1), *(trimesh->verts + (trimesh->tris + i)->y - 1),
-			*(trimesh->verts + (trimesh->tris + i)->z - 1), *(trimesh->vnorms + (trimesh->tris + i)->vn1 - 1), m, lights, num_lights);
+		if (triangleTest(V, W, *(trimesh->verts + (trimesh->tris + i)->x - 1), *(trimesh->verts + (trimesh->tris + i)->y - 1),
+			*(trimesh->verts + (trimesh->tris + i)->z - 1), *(trimesh->vnorms + (trimesh->tris + i)->vn1 - 1), P))
+		{ //Did we hit something?
+			//is this point closer to the camera? 
+			//TODO make this relative to ANY camera position
+			if (P.z > *z)
+			{
+				N = *(trimesh->vnorms + (trimesh->tris + i)->vn1 - 1);
 
-		if (dot(c, glm::vec3(1.)) > 0.)
-		{
-			return c;
+				//we are closer so update the z position
+				*z = P.z;
+			}
+			hit = true;
 		}
+	}
+
+	//shade the closest point if we hit something
+	if (hit)
+	{
+		return shadePoint(P, W, N, m, lights, num_lights);
 	}
 
 	return color;
