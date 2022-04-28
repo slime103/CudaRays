@@ -161,47 +161,8 @@ __device__ inline float rayHalfspace(glm::vec3 V, glm::vec3 W, glm::vec4 H) {
 	return -dot(V1, H) / dot(W0, H);
 }
 
-__device__ glm::vec3 shadePoint(glm::vec3 P, glm::vec3 W, glm::vec3 N, material* m, pointLight* lights, int num_lights)
-{
-	glm::vec3 c = glm::vec3(0.f);
-	for (int l = 0; l < num_lights; l++)
-	{
-		glm::vec3 contribution = glm::vec3(0.f);
-
-		//calculate the light direction from the point lamps
-		glm::vec3 Ld = (lights + l)->location - P;
-		float distance = length(Ld);
-		distance = distance * distance;
-		Ld = normalize(Ld);
-
-		// TODO: shadows for all surfaces
-		/*for (int i = 0; i < trimesh->numOfTris; i++)
-		{
-			//vertex indexes begin at 1 for obj files, thus the -1
-			float z = -1000.f;
-			glm::vec3 P = triangleTest((lights + l)->location, Ld, &z, *(trimesh->verts + (trimesh->tris + i)->x - 1), *(trimesh->verts + (trimesh->tris + i)->y - 1),
-				*(trimesh->verts + (trimesh->tris + i)->z - 1), *(trimesh->vnorms + (trimesh->tris + i)->vn1 - 1));
-
-			if (dot(P, glm::vec3(1.)) > 0.)
-			{
-				t = 1;
-				break;
-			}
-		}*/
-
-		glm::vec3 Rd = 2.f * N * dot(N, Ld) - Ld;
-		contribution += (lights + l)->color * m->diffuse * glm::max(0.f, dot(N, Ld));
-		contribution += m->specular * pow(glm::max(0.f, dot(Rd, -W)), m->power);
-		contribution *= (lights + l)->i / distance;
-		c += contribution;
-	}
-
-	return m->ambient + c;
-	//return glm::vec3(1.f);
-}
-
 /* Return a point P if V, W intersects triangle ABC */
-__device__ bool inline triangleTest(glm::vec3 V, glm::vec3 W, glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 N, glm::vec3 &P)
+__device__ inline bool triangleTest(glm::vec3 V, glm::vec3 W, glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 N, glm::vec3 &P)
 {
 	float d = -dot(N, a);
 	glm::vec4 H = glm::vec4(N.x, N.y, N.z, d);
@@ -246,13 +207,11 @@ __device__ bool inline triangleTest(glm::vec3 V, glm::vec3 W, glm::vec3 a, glm::
 	return false;
 }
 
-/*Each vector of indicies contains the three indexes that make a triangle,
-indexes of vertex coordinates stored in the verticies array*/
-__device__ inline glm::vec3 drawTriangles(glm::vec3 V, glm::vec3 W, glm::vec3 color, float* z, TriangleMesh* trimesh, material* m, pointLight* lights, int num_lights)
+/*Returns a point P of the closest triangle*/
+__device__ inline bool testTriangles(glm::vec3 V, glm::vec3 W, glm::vec3 &P, glm::vec3 &N, TriangleMesh* trimesh)
 {
-	glm::vec3 P;
-	glm::vec3 N;
 	bool hit = false;
+	float z = 1000.f;
 
 	//loop through all triangles in the scene
 	for (int i = 0; i < trimesh->numOfTris; i++)
@@ -262,25 +221,52 @@ __device__ inline glm::vec3 drawTriangles(glm::vec3 V, glm::vec3 W, glm::vec3 co
 			*(trimesh->verts + (trimesh->tris + i)->z - 1), *(trimesh->vnorms + (trimesh->tris + i)->vn1 - 1), P))
 		{ //Did we hit something?
 			//is this point closer to the camera? 
-			//TODO make this relative to ANY camera position
-			if (P.z > *z)
+			float dist = glm::distance(V, P);
+			if (dist < z)
 			{
 				N = *(trimesh->vnorms + (trimesh->tris + i)->vn1 - 1);
 
 				//we are closer so update the z position
-				*z = P.z;
+				z = dist;
 			}
 			hit = true;
 		}
 	}
 
 	//shade the closest point if we hit something
-	if (hit)
+	return hit;
+}
+
+__device__ glm::vec3 shadePoint(glm::vec3 P, glm::vec3 W, glm::vec3 N, TriangleMesh* trimesh, material* m, pointLight* lights, int num_lights)
+{
+	glm::vec3 c = glm::vec3(0.f);
+	for (int l = 0; l < num_lights; l++)
 	{
-		return shadePoint(P, W, N, m, lights, num_lights);
+		glm::vec3 contribution = glm::vec3(0.f);
+
+		//calculate the light direction from the point lamps
+		glm::vec3 Ld = (lights + l)->location - P;
+		float distance = length(Ld);
+		distance = distance * distance;
+		Ld = normalize(Ld);
+
+		// TODO: shadows for all surfaces
+
+		//shadows from other triangles
+		if (testTriangles((lights + l)->location, Ld, P, glm::vec3(0.f), trimesh))
+		{
+			continue;
+		}
+
+		glm::vec3 Rd = 2.f * N * dot(N, Ld) - Ld;
+		contribution += (lights + l)->color * m->diffuse * glm::max(0.f, dot(N, Ld));
+		contribution += m->specular * pow(glm::max(0.f, dot(Rd, -W)), m->power);
+		contribution *= (lights + l)->i / distance;
+		c += contribution;
 	}
 
-	return color;
+	return m->ambient + c;
+	//return glm::vec3(1.f);
 }
 
 /*
@@ -349,10 +335,14 @@ __global__ void shadePixels(glm::vec3* p, TriangleMesh* trimesh)
 
 	//color = raySpheres(-1.f, V, W, &spheres[0], 3, color, sphere_mat, &lights[0], 1);
 
-	//only darw the point closest to the camera
-	float z = -1000.f; //far clip plane
+	glm::vec3 P;
+	glm::vec3 N;
 
-	color = drawTriangles(V, W, color, &z, trimesh, &sphere_mat, &lights[0], num_lights);
+	if (testTriangles(V, W, P, N, trimesh))
+	{
+		color = shadePoint(P, W, N, trimesh, &sphere_mat, &lights[0], num_lights);
+	}
+	
 	//color += triangleTest(V, W, *(trimesh->verts + (trimesh->tris)->x), *(trimesh->verts + (trimesh->tris)->y),
 		//*(trimesh->verts + (trimesh->tris)->z), &sphere_mat, &light, 1);
 	//color += triangleTest(V, W, glm::vec3(-0.1f, 0.0f, -1.f), glm::vec3(0.1f, 0.0f, -1.f), glm::vec3(0.f, 0.1f, -1.f), glm::vec3(0.f, 0.f, 1.f), &sphere_mat, &light, 1);
