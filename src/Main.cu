@@ -12,6 +12,7 @@
 #include "GLM/glm/geometric.hpp"
 #include <curand.h>
 #include <curand_kernel.h>
+//#include "SimplexNoise.h"
 
 struct Vector4i
 {
@@ -313,9 +314,69 @@ struct Camera
 
 	//select a focal length, aperature, and focus distance
 	const float focal_length = 0.05f; // 50mm
-	//const float aperture = 16.0f; // f16
-	//const float focus_dist = 3.f; // 3m
+	const float aperture = 16.0f; // f16
+	const float focus_dist = 3.f; // 3m
 };
+
+//Returns a point on a concentric disk, takes x and y values between -1 and 1
+__device__ inline void sampleDisk(float &x, float &y)
+{
+	static const float PiOver2 = 1.570796326794896619231321691639;
+	static const float PiOver4 = 0.785398163397448309615660845819;
+
+	float theta, r;
+
+	if (abs(x) > abs(y)) 
+	{
+		r = x;
+		theta = PiOver4 * (y / x);
+	}
+	else 
+	{
+		r = y;
+		theta = PiOver2 - PiOver4 * (x / y);
+	}
+
+	x = r * cos(theta);
+	y = r * sin(theta);
+}
+/*
+//Takes a ray, V, W, and returns a new ray direction using a lens sample point
+__device__ inline void dofRay(glm::vec3 &V, glm::vec3 &W, const Camera& camera)
+{
+	//Sample a point on a disk, SP (sample point)
+	float x, y, z;
+
+	x = SimplexNoise::noise((float) blockDim.x * blockIdx.x + threadIdx.x);
+	y = SimplexNoise::noise((float) gridDim.x * blockIdx.x + threadIdx.x);
+	z = SimplexNoise::noise(gridDim.x + (float) blockIdx.x * threadIdx.x);
+
+	if (z > -0.5f)
+	{
+		x = -x;
+	}
+	else if (z > 0.f)
+	{
+		y = -y;
+	}
+	else if (z > 0.5f)
+	{
+		x = -x;
+		y = -y;
+	}
+
+	sampleDisk(x, y);
+
+	//Convert unit disk coordinates to lens diameter, LP (lens point)
+	V.x = x * camera.focal_length / camera.aperture;
+	V.y = y * camera.focal_length / camera.aperture;
+
+	//calculate the focal point by scaling the primary ray and adding it to the ray origin position
+	glm::vec3 focalPoint = V + (W * camera.focus_dist);
+
+	//Construct a unit vector from the sample point to the focal point, FD (focal direction)
+	W = normalize(focalPoint - V);
+}*/
 
 __device__ inline glm::vec3 shadePoint(const Camera &camera, const float pixel_x, const float pixel_y, TriangleMesh* trimesh)
 {
@@ -330,6 +391,8 @@ __device__ inline glm::vec3 shadePoint(const Camera &camera, const float pixel_x
 	//Set V and W ... TODO add lens configurations
 	glm::vec3 V = glm::vec3(0.f, 0.f, camera.focal_length);
 	glm::vec3 W = glm::vec3(V.x + pixelpos.x, V.y + pixelpos.y, -1.f * V.z);
+
+	//dofRay(V, W, camera);
 
 	//set the background color
 	glm::vec3 color = glm::vec3(0.35f, 0.35f, 0.4f);
@@ -399,7 +462,7 @@ __global__ void shadePixels(glm::vec3* pixelptr, TriangleMesh* trimesh)
 		//float rand_y = pixel_y + curand_uniform(&state) * pixel_height;
 	}
 
-	//average the sample colors
+	//average the pixel sample colors
 	color /= num_pixel_samples;
 
 	//Set the final color
