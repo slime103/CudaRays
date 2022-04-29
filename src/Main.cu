@@ -10,7 +10,8 @@
 #include "GLM/glm/vec3.hpp"
 #include "GLM/glm/vec4.hpp"
 #include "GLM/glm/geometric.hpp"
-//#include "GLM/glm/common.hpp"
+#include <curand.h>
+#include <curand_kernel.h>
 
 struct Vector4i
 {
@@ -237,6 +238,24 @@ __device__ inline bool testTriangles(glm::vec3 V, glm::vec3 W, glm::vec3 &P, glm
 	return hit;
 }
 
+/*Returns true if any triangle is hit*/
+__device__ inline bool testTrianglesAny(glm::vec3 V, glm::vec3 W, TriangleMesh* trimesh)
+{
+	glm::vec3 P;
+
+	//loop through all triangles in the scene
+	for (int i = 0; i < trimesh->numOfTris; i++)
+	{
+		//vertex indexes begin at 1 for obj files, thus the -1
+		if (triangleTest(V, W, *(trimesh->verts + (trimesh->tris + i)->x - 1), *(trimesh->verts + (trimesh->tris + i)->y - 1),
+			*(trimesh->verts + (trimesh->tris + i)->z - 1), *(trimesh->vnorms + (trimesh->tris + i)->vn1 - 1), P))
+		{ //Did we hit something?
+			return true;
+		}
+	}
+	return false;
+}
+
 __device__ glm::vec3 shadePoint(glm::vec3 P, glm::vec3 W, glm::vec3 N, TriangleMesh* trimesh, material* m, pointLight* lights, int num_lights)
 {
 	glm::vec3 c = glm::vec3(0.f);
@@ -253,7 +272,8 @@ __device__ glm::vec3 shadePoint(glm::vec3 P, glm::vec3 W, glm::vec3 N, TriangleM
 		// TODO: shadows for all surfaces
 
 		//shadows from other triangles
-		if (testTriangles((lights + l)->location, Ld, P, glm::vec3(0.f), trimesh))
+		//trace from the point back to the light, is another triangle in the way?
+		if (testTrianglesAny(P, Ld, trimesh))
 		{
 			continue;
 		}
@@ -285,55 +305,40 @@ __device__ inline glm::vec3 raySpheres(float tMin, glm::vec3 V, glm::vec3 W, sph
 	return color;
 }*/
 
-__global__ void shadePixels(glm::vec3* p, TriangleMesh* trimesh)
+struct Camera
 {
-	int pixel_x = threadIdx.x;
-	int pixel_y = blockIdx.x;
-
-	//pixels are stored colunm/block num by row/thread offset
-	//-----------------------------
-	//---------------x-------------
-	//-----------------------------
-	p = p + (pixel_y * blockDim.x) + pixel_x;
-
 	//set the film size
 	const float image_plane_width = 0.07f; // 7cm
 	const float image_plane_height = 0.06f; // 6cm
-
-	//calculate pixel area to sample over (coordinates begin at the top left of each pixel)
-	//const float pixel_width = image_plane_width / blockDim.x;
-
-	//this is where pixel sample points should be generated, before conversion to camera space
-
-	//find this pixel's camera space position
-	glm::vec3 pixelpos;
-	pixelpos.x = (float) pixel_x / blockDim.x;
-	pixelpos.x = pixelpos.x * image_plane_width - (image_plane_width / 2.0f);
-	pixelpos.y = (float) pixel_y / gridDim.x;
-	pixelpos.y = -pixelpos.y * image_plane_height + (image_plane_height / 2.0f);
-	pixelpos.z = 0.f;
 
 	//select a focal length, aperature, and focus distance
 	const float focal_length = 0.05f; // 50mm
 	//const float aperture = 16.0f; // f16
 	//const float focus_dist = 3.f; // 3m
+};
+
+__device__ inline glm::vec3 shadePoint(const Camera &camera, const float pixel_x, const float pixel_y, TriangleMesh* trimesh)
+{
+	//find this pixel's camera space position
+	glm::vec3 pixelpos;
+	pixelpos.x = pixel_x / blockDim.x;
+	pixelpos.x = pixelpos.x * camera.image_plane_width - (camera.image_plane_width / 2.0f);
+	pixelpos.y = pixel_y / gridDim.x;
+	pixelpos.y = -pixelpos.y * camera.image_plane_height + (camera.image_plane_height / 2.0f);
+	pixelpos.z = 0.f;
 
 	//Set V and W ... TODO add lens configurations
-	glm::vec3 V = glm::vec3(0.f, 0.f, focal_length);
-	glm::vec3 W = glm::vec3(V.x + pixelpos.x,  V.y + pixelpos.y, -1.f * V.z);
+	glm::vec3 V = glm::vec3(0.f, 0.f, camera.focal_length);
+	glm::vec3 W = glm::vec3(V.x + pixelpos.x, V.y + pixelpos.y, -1.f * V.z);
 
 	//set the background color
 	glm::vec3 color = glm::vec3(0.35f, 0.35f, 0.4f);
 
-	// TEMP DEFINE SPHERE DATA
-	//sphere spheres[3] = {sphere(0.f, 0.f, -5.f, 1.f), sphere(0.5f, 0.f, -3.f, 1.f), sphere(-0.5f, 0.f, -7.f, 1.f)};
 	// TEMP DEFINE LIGHT DATA
 	const int num_lights = 2;
-	pointLight lights[num_lights] = { pointLight(0.5f, 3.5f, -5.5f, .59f, .93f, .59f, 25.f), pointLight(1.5f, -.5f, -1.5f, .19f, .63f, .49f, 15.f) };
+	pointLight lights[num_lights] = { pointLight(0.5f, 5.5f, -5.5f, .59f, .93f, .59f, 25.f), pointLight(1.5f, -.5f, -1.5f, .19f, .63f, .49f, 3.f) };
 	// TEMP DEFINE MATERIAL DATA
 	material sphere_mat = material(0.1f, 0.1f, 0.1f, 0.2f, 0.4f, 0.5f, 1.f, 1.f, 1.f, 1.5f);
-
-	//color = raySpheres(-1.f, V, W, &spheres[0], 3, color, sphere_mat, &lights[0], 1);
 
 	glm::vec3 P;
 	glm::vec3 N;
@@ -342,15 +347,65 @@ __global__ void shadePixels(glm::vec3* p, TriangleMesh* trimesh)
 	{
 		color = shadePoint(P, W, N, trimesh, &sphere_mat, &lights[0], num_lights);
 	}
-	
-	//color += triangleTest(V, W, *(trimesh->verts + (trimesh->tris)->x), *(trimesh->verts + (trimesh->tris)->y),
-		//*(trimesh->verts + (trimesh->tris)->z), &sphere_mat, &light, 1);
-	//color += triangleTest(V, W, glm::vec3(-0.1f, 0.0f, -1.f), glm::vec3(0.1f, 0.0f, -1.f), glm::vec3(0.f, 0.1f, -1.f), glm::vec3(0.f, 0.f, 1.f), &sphere_mat, &light, 1);
+
+	return color;
+}
+
+__global__ void shadePixels(glm::vec3* pixelptr, TriangleMesh* trimesh)
+{
+	int pixel_x = threadIdx.x;
+	int pixel_y = blockIdx.x;
+
+	//pixels are stored colunm/block num by row/thread offset
+	//-----------------------------
+	//---------------x-------------
+	//-----------------------------
+	pixelptr = pixelptr + (pixel_y * blockDim.x) + pixel_x;
+
+	Camera camera;
+
+	const int num_pixel_samples = 25;
+
+	//curandState_t state;
+
+	glm::vec3 color = glm::vec3(0.);
+
+	for (int i = 0; i < num_pixel_samples; i++)
+	{
+		//TODO: divide the pixel further into cells
+		/*for (int j = 0; j < num_pixel_samples; j++)
+		{
+			color += shadePoint(camera, pixel_x + (1 / num_pixel_samples) * i + (1 / (num_pixel_samples * 2)), 
+			pixel_y + (1 / num_pixel_samples) * j + (1 / (num_pixel_samples * 2)), trimesh);
+		}*/
+		
+		//this takes samples in an x pattern
+		float rand_x, rand_y;
+		if (i < num_pixel_samples/2)
+		{
+			rand_x = pixel_x + 1 / num_pixel_samples * i;
+			rand_y = pixel_y + 1 / num_pixel_samples * i;
+		}
+		else
+		{
+			rand_x = (pixel_x + 1) - 1 / num_pixel_samples * i;
+			rand_y = pixel_y + 1 / num_pixel_samples * i;
+		}
+		color += shadePoint(camera, rand_x,	rand_y, trimesh);
+
+		//select a random point within the interval
+		//curand_init(2127+i, (blockDim.x * pixel_y + pixel_x), 0, &state);
+		//float rand_x = pixel_x + curand_uniform(&state) * pixel_width;
+		//float rand_y = pixel_y + curand_uniform(&state) * pixel_height;
+	}
+
+	//average the sample colors
+	color /= num_pixel_samples;
 
 	//Set the final color
-	p->r = glm::clamp(color.x * 255.f, 0.f, 255.f);
-	p->g = glm::clamp(color.y * 255.f, 0.f, 255.f);
-	p->b = glm::clamp(color.z * 255.f, 0.f, 255.f);
+	pixelptr->r = glm::clamp(color.x * 255.f, 0.f, 255.f);
+	pixelptr->g = glm::clamp(color.y * 255.f, 0.f, 255.f);
+	pixelptr->b = glm::clamp(color.z * 255.f, 0.f, 255.f);
 
 }
 
