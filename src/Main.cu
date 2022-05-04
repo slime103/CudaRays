@@ -14,32 +14,65 @@
 #include <curand_kernel.h>
 //#include "SimplexNoise.h"
 
-struct Vector4i
+struct face
 {
 	int x;
 	int y;
 	int z;
 	int vn1;
+	int vn2;
+	int vn3;
 };
 
-struct TriangleMesh
+struct material
+{
+	glm::vec3 diffuse;
+	glm::vec3 ambient;
+	glm::vec3 specular;
+	float power;
+
+	__device__ material(float r1, float g1, float b1, float r2, float g2, float b2, float r3, float g3, float b3, float p)
+	{
+		diffuse.r = r1;
+		diffuse.g = g1;
+		diffuse.b = b1;
+		ambient.r = r2;
+		ambient.g = g2;
+		ambient.b = b2;
+		specular.r = r3;
+		specular.g = g3;
+		specular.b = b3;
+		power = p;
+	};
+};
+
+struct VertexData
 {
 	int numOfVerts = 0;
 	int numOfTris = 0;
 	glm::vec3* verts = nullptr;
 	glm::vec3* vnorms = nullptr;
-	Vector4i* tris = nullptr;
 };
 
-static void parseOBJFile(const std::string filePath, TriangleMesh* triMesh)
+struct TriangleMesh
+{
+	char name[10];
+	material* mat;
+	face* tris = nullptr;
+};
+
+static void parseOBJFile(const std::string filePath, TriangleMesh* triMeshes, int maxMeshes, int &numOfMeshes)
 {
 	std::ifstream stream(filePath);
 
 	std::string line;
 
+	int mesh_iterator = -1; //gets set to 0 on first obj scan
 	int vert_iterator = 0;
 	int tris_iterator = 0;
 	int vnorm_iterator = 0;
+	//int vert_culmlative = 0;
+	//int vn_culmlative = 0;
 
 	while (getline(stream, line, ' '))
 	{
@@ -53,7 +86,8 @@ static void parseOBJFile(const std::string filePath, TriangleMesh* triMesh)
 			getline(stream, line, '\n');
 			vertex.z = std::stof(line);
 
-			*(triMesh->verts + vert_iterator++) = vertex;
+			*((triMeshes + mesh_iterator)->verts + vert_iterator++) = vertex;
+			(triMeshes + mesh_iterator)->numOfVerts = vert_iterator;
 			continue;
 		}
 		if (line.compare("vn") == 0)
@@ -66,12 +100,12 @@ static void parseOBJFile(const std::string filePath, TriangleMesh* triMesh)
 			getline(stream, line, '\n');
 			vnorm.z = std::stof(line);
 
-			*(triMesh->vnorms + vnorm_iterator++) = vnorm;
+			*((triMeshes + mesh_iterator)->vnorms + vnorm_iterator++) = vnorm;
 			continue;
 		}
 		if (line == "f") //f  v1/vt1/vn1 ..
 		{
-			Vector4i face;
+			face face;
 			getline(stream, line, '/');
 			face.x = std::stoi(line);
 			getline(stream, line, '/');
@@ -79,19 +113,40 @@ static void parseOBJFile(const std::string filePath, TriangleMesh* triMesh)
 			face.vn1 = std::stoi(line);
 			getline(stream, line, '/');
 			face.y = std::stoi(line);
+			getline(stream, line, '/');
 			getline(stream, line, ' ');
+			face.vn2 = std::stoi(line);
 			getline(stream, line, '/');
 			face.z = std::stoi(line);
+			getline(stream, line, '/');
+			getline(stream, line, '\n');
+			face.vn3 = std::stoi(line);
 
-			*(triMesh->tris + tris_iterator++) = face;
+			*((triMeshes + mesh_iterator)->tris + tris_iterator++) = face;
+			(triMeshes + mesh_iterator)->numOfTris = tris_iterator;
+		}
+		if (line == "o") //object name
+		{
+			if (mesh_iterator == maxMeshes-1)
+			{
+				break; //max number of meshes reached
+			}
+
+			//prepare scanning for next mesh
+			mesh_iterator++;
+
+			vert_iterator = 0;
+			vnorm_iterator = 0;
+			tris_iterator = 0;
+
+			getline(stream, line, '\n');
+			std::strcpy((triMeshes + mesh_iterator)->name, line.c_str());		
+
+			continue;
 		}
 		getline(stream, line, '\n');
 	}
-
-	triMesh->numOfVerts = vert_iterator;
-	triMesh->numOfTris = tris_iterator;
-
-
+	numOfMeshes = mesh_iterator+1;
 	stream.close();
 }
 
@@ -128,27 +183,6 @@ struct pointLight
 	};
 };
 
-struct material
-{
-	glm::vec3 diffuse;
-	glm::vec3 ambient;
-	glm::vec3 specular;
-	float power;
-
-	__device__ material(float r1, float g1, float b1, float r2, float g2, float b2, float r3, float g3, float b3, float p)
-	{
-		diffuse.r = r1;
-		diffuse.g = g1;
-		diffuse.b = b1;
-		ambient.r = r2;
-		ambient.g = g2;
-		ambient.b = b2;
-		specular.r = r3;
-		specular.g = g3;
-		specular.b = b3;
-		power = p;
-	};
-};
 /*
 __device__ inline float raySphere(glm::vec3 V, glm::vec3 W, sphere S) {
 	V = V - S.location + W * 0.001f;
@@ -210,28 +244,31 @@ __device__ inline bool triangleTest(glm::vec3 V, glm::vec3 W, glm::vec3 a, glm::
 }
 
 /*Returns a point P of the closest triangle*/
-__device__ inline bool testTriangles(glm::vec3 V, glm::vec3 W, glm::vec3 &P, glm::vec3 &N, TriangleMesh* trimesh)
+__device__ inline bool testTriangles(glm::vec3 V, glm::vec3 W, glm::vec3 &P, glm::vec3 &N, TriangleMesh* trimesh, int numOfMeshes)
 {
 	bool hit = false;
 	float z = 1000.f;
 
 	//loop through all triangles in the scene
-	for (int i = 0; i < trimesh->numOfTris; i++)
+	for (int k = 0; k < numOfMeshes; k++)
 	{
-		//vertex indexes begin at 1 for obj files, thus the -1
-		if (triangleTest(V, W, *(trimesh->verts + (trimesh->tris + i)->x - 1), *(trimesh->verts + (trimesh->tris + i)->y - 1),
-			*(trimesh->verts + (trimesh->tris + i)->z - 1), *(trimesh->vnorms + (trimesh->tris + i)->vn1 - 1), P))
-		{ //Did we hit something?
-			//is this point closer to the camera? 
-			float dist = glm::distance(V, P);
-			if (dist < z)
-			{
-				N = *(trimesh->vnorms + (trimesh->tris + i)->vn1 - 1);
+		for (int i = 0; i < trimesh->numOfTris; i++)
+		{
+			//vertex indexes begin at 1 for obj files, thus the -1
+			if (triangleTest(V, W, *((trimesh + k)->verts + ((trimesh + k)->tris + i)->x - 1), *((trimesh + k)->verts + ((trimesh + k)->tris + i)->y - 1),
+				*((trimesh + k)->verts + ((trimesh + k)->tris + i)->z - 1), *((trimesh + k)->vnorms + ((trimesh + k)->tris + i)->vn1 - 1), P))
+			{ //Did we hit something?
+				//is this point closer to the camera? 
+				float dist = glm::distance(V, P);
+				if (dist < z)
+				{
+					N = *((trimesh + k)->vnorms + ((trimesh + k)->tris + i)->vn1 - 1);
 
-				//we are closer so update the z position
-				z = dist;
+					//we are closer so update the z position
+					z = dist;
+				}
+				hit = true;
 			}
-			hit = true;
 		}
 	}
 
@@ -240,24 +277,28 @@ __device__ inline bool testTriangles(glm::vec3 V, glm::vec3 W, glm::vec3 &P, glm
 }
 
 /*Returns true if any triangle is hit*/
-__device__ inline bool testTrianglesAny(glm::vec3 V, glm::vec3 W, TriangleMesh* trimesh)
+__device__ inline bool testTrianglesAny(glm::vec3 V, glm::vec3 W, TriangleMesh* trimesh, int numOfMeshes)
 {
 	glm::vec3 P;
 
 	//loop through all triangles in the scene
-	for (int i = 0; i < trimesh->numOfTris; i++)
+	for (int k = 0; k < numOfMeshes; k++)
 	{
-		//vertex indexes begin at 1 for obj files, thus the -1
-		if (triangleTest(V, W, *(trimesh->verts + (trimesh->tris + i)->x - 1), *(trimesh->verts + (trimesh->tris + i)->y - 1),
-			*(trimesh->verts + (trimesh->tris + i)->z - 1), *(trimesh->vnorms + (trimesh->tris + i)->vn1 - 1), P))
-		{ //Did we hit something?
-			return true;
+		for (int i = 0; i < trimesh->numOfTris; i++)
+		{
+			//vertex indexes begin at 1 for obj files, thus the -1
+			if (triangleTest(V, W, *((trimesh + k)->verts + ((trimesh + k)->tris + i)->x - 1), *((trimesh + k)->verts + ((trimesh + k)->tris + i)->y - 1),
+				*((trimesh + k)->verts + ((trimesh + k)->tris + i)->z - 1), *((trimesh + k)->vnorms + ((trimesh + k)->tris + i)->vn1 - 1), P))
+			{ //Did we hit something?
+				return true;
+			}
 		}
 	}
+
 	return false;
 }
 
-__device__ glm::vec3 shadePoint(glm::vec3 P, glm::vec3 W, glm::vec3 N, TriangleMesh* trimesh, material* m, pointLight* lights, int num_lights)
+__device__ glm::vec3 shadePoint(glm::vec3 P, glm::vec3 W, glm::vec3 N, TriangleMesh* trimesh, material* m, pointLight* lights, int num_lights, int numOfMeshes)
 {
 	glm::vec3 c = glm::vec3(0.f);
 	for (int l = 0; l < num_lights; l++)
@@ -274,7 +315,7 @@ __device__ glm::vec3 shadePoint(glm::vec3 P, glm::vec3 W, glm::vec3 N, TriangleM
 
 		//shadows from other triangles
 		//trace from the point back to the light, is another triangle in the way?
-		if (testTrianglesAny(P, Ld, trimesh))
+		if (testTrianglesAny(P, Ld, trimesh, numOfMeshes))
 		{
 			continue;
 		}
@@ -378,7 +419,7 @@ __device__ inline void dofRay(glm::vec3 &V, glm::vec3 &W, const Camera& camera)
 	W = normalize(focalPoint - V);
 }*/
 
-__device__ inline glm::vec3 shadePoint(const Camera &camera, const float pixel_x, const float pixel_y, TriangleMesh* trimesh)
+__device__ inline glm::vec3 shadePoint(const Camera &camera, const float pixel_x, const float pixel_y, TriangleMesh* trimesh, int numOfMeshes)
 {
 	//find this pixel's camera space position
 	glm::vec3 pixelpos;
@@ -395,7 +436,7 @@ __device__ inline glm::vec3 shadePoint(const Camera &camera, const float pixel_x
 	//dofRay(V, W, camera);
 
 	//set the background color
-	glm::vec3 color = glm::vec3(0.35f, 0.35f, 0.4f);
+	glm::vec3 color = glm::vec3(0.6f, 0.8f, 0.8f);
 
 	// TEMP DEFINE LIGHT DATA
 	const int num_lights = 2;
@@ -406,15 +447,15 @@ __device__ inline glm::vec3 shadePoint(const Camera &camera, const float pixel_x
 	glm::vec3 P;
 	glm::vec3 N;
 
-	if (testTriangles(V, W, P, N, trimesh))
+	if (testTriangles(V, W, P, N, trimesh, numOfMeshes))
 	{
-		color = shadePoint(P, W, N, trimesh, &sphere_mat, &lights[0], num_lights);
+		color = shadePoint(P, W, N, trimesh, &sphere_mat, &lights[0], num_lights, numOfMeshes);
 	}
 
 	return color;
 }
 
-__global__ void shadePixels(glm::vec3* pixelptr, TriangleMesh* trimesh)
+__global__ void shadePixels(glm::vec3* pixelptr, TriangleMesh* trimesh, int numOfMeshes)
 {
 	int pixel_x = threadIdx.x;
 	int pixel_y = blockIdx.x;
@@ -427,7 +468,7 @@ __global__ void shadePixels(glm::vec3* pixelptr, TriangleMesh* trimesh)
 
 	Camera camera;
 
-	const int num_pixel_samples = 25;
+	const int num_pixel_samples = 4; //must be divisible by 2
 
 	//curandState_t state;
 
@@ -454,7 +495,7 @@ __global__ void shadePixels(glm::vec3* pixelptr, TriangleMesh* trimesh)
 			rand_x = (pixel_x + 1) - 1 / num_pixel_samples * i;
 			rand_y = pixel_y + 1 / num_pixel_samples * i;
 		}
-		color += shadePoint(camera, rand_x,	rand_y, trimesh);
+		color += shadePoint(camera, rand_x,	rand_y, trimesh, numOfMeshes);
 
 		//select a random point within the interval
 		//curand_init(2127+i, (blockDim.x * pixel_y + pixel_x), 0, &state);
@@ -484,27 +525,37 @@ int main()
 
 	
 	//Read in Triangle information from OBJ file
-	TriangleMesh* trimesh;
-	glm::vec3* verts;
-	glm::vec3* vnorms;
-	Vector4i* tris;
-	cudaMallocManaged(&trimesh, sizeof(TriangleMesh));
-	cudaMallocManaged(&verts, sizeof(glm::vec3) * 1000);
-	cudaMallocManaged(&vnorms, sizeof(glm::vec3) * 1000);
-	cudaMallocManaged(&tris, sizeof(Vector4i) * 1000);
-	trimesh->verts = verts;
-	trimesh->vnorms = vnorms;
-	trimesh->tris = tris;
+	TriangleMesh* trimeshes;
+	const int maxMeshes = 3;
+	const int maxVertices = 300;
+	
+	cudaMallocManaged(&trimeshes, sizeof(TriangleMesh) * maxMeshes);
+
+	for (int i = 0; i < maxMeshes; i++)
+	{
+		glm::vec3* verts;
+		glm::vec3* vnorms;
+		face* tris;
+
+		cudaMallocManaged(&verts, sizeof(glm::vec3) * maxVertices * maxMeshes);
+		cudaMallocManaged(&vnorms, sizeof(glm::vec3) * maxVertices * maxMeshes);
+		cudaMallocManaged(&tris, sizeof(face) * maxVertices * maxMeshes);
+		(trimeshes + i)->verts = verts;
+		(trimeshes + i)->vnorms = vnorms;
+		(trimeshes + i)->tris = tris;
+	}
+	
 
 	auto start_p0 = std::chrono::system_clock::now();
 
-	parseOBJFile("in/mnky.obj", trimesh);
+	int numOfMeshes;
+	parseOBJFile("in/mnky.obj", trimeshes, maxMeshes, numOfMeshes);
 
 	auto start_p1 = std::chrono::system_clock::now();
 	std::chrono::duration<double> elapsed_p0 = start_p0 - start_p1;
 
 	//run the kernel, <<< numOf Blocks, numOf threads per block >>>
-	shadePixels <<<image_height, image_width>>> (pixels, trimesh);
+	shadePixels <<<image_height, image_width>>> (pixels, trimeshes, numOfMeshes);
 
 	cudaDeviceSynchronize();
 
@@ -542,10 +593,15 @@ int main()
 
 	//clean up
 	image_of.close();
-	cudaFree(trimesh->verts);
-	cudaFree(trimesh->vnorms);
-	cudaFree(trimesh->tris);
-	cudaFree(trimesh);
+
+	for (int i = 0; i < maxMeshes; i++)
+	{
+		cudaFree((trimeshes + i)->verts);
+		cudaFree((trimeshes + i)->vnorms);
+		cudaFree((trimeshes + i)->tris);
+	}
+	
+	cudaFree(trimeshes);
 	cudaFree(pixels);
 	cudaDeviceReset();
 
