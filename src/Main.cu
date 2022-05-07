@@ -14,6 +14,7 @@
 #include <curand_kernel.h>
 //#include "SimplexNoise.h"
 
+//specifies the vertex indicies of a triangle
 struct face
 {
 	int x;
@@ -26,6 +27,7 @@ struct face
 
 struct material
 {
+	char name[10];
 	glm::vec3 diffuse;
 	glm::vec3 ambient;
 	glm::vec3 specular;
@@ -57,12 +59,65 @@ struct VertexData
 struct TriangleMesh
 {
 	char name[10];
+	bool isSmooth = false;
 	material* mat;
 	int numOfTris = 0;
 	face* tris = nullptr;
 };
 
-static void parseOBJFile(const std::string filePath, VertexData* vertData, TriangleMesh* triMeshes, int maxMeshes, int &numOfMeshes)
+struct sphere
+{
+	glm::vec3 location;
+	float r;
+
+	__device__ sphere(float x, float y, float z, float r)
+	{
+		location.x = x;
+		location.y = y;
+		location.z = z;
+		this->r = r;
+	};
+};
+
+struct pointLight
+{
+	glm::vec3 location;
+	glm::vec3 color;
+
+	float i; //intensity
+
+	__device__ pointLight(float x, float y, float z, float r, float g, float b, float intensity)
+	{
+		location.x = x;
+		location.y = y;
+		location.z = z;
+		color.x = r;
+		color.y = g;
+		color.z = b;
+		i = intensity;
+	};
+};
+/*
+static void parseMTLFile(const std::string filePath, material* materials, int maxMaterials)
+{
+	std::ifstream stream(filePath);
+
+	std::string line;
+
+	int mat_iterator = 0;
+
+	while (getline(stream, line, ' '))
+	{
+		if (line.compare("newmtl") == 0)
+		{
+			
+		}
+	}
+	stream.close();
+}*/
+
+//TODO: update to scan the file twice, the first pass will allocate the appropriate amount of space
+static void parseOBJFile(const std::string filePath, VertexData* vertData, TriangleMesh* trimeshes, int maxMeshes, int &numOfMeshes)
 {
 	std::ifstream stream(filePath);
 
@@ -72,8 +127,6 @@ static void parseOBJFile(const std::string filePath, VertexData* vertData, Trian
 	int vert_iterator = 0;
 	int tris_iterator = 0;
 	int vnorm_iterator = 0;
-	//int vert_culmlative = 0;
-	//int vn_culmlative = 0;
 
 	while (getline(stream, line, ' '))
 	{
@@ -122,8 +175,8 @@ static void parseOBJFile(const std::string filePath, VertexData* vertData, Trian
 			getline(stream, line, '\n');
 			face.vn3 = std::stoi(line);
 
-			*((triMeshes + mesh_iterator)->tris + tris_iterator++) = face;
-			(triMeshes + mesh_iterator)->numOfTris = tris_iterator;
+			*((trimeshes + mesh_iterator)->tris + tris_iterator++) = face;
+			(trimeshes + mesh_iterator)->numOfTris = tris_iterator;
 			continue;
 		}
 		if (line == "o") //object name
@@ -138,49 +191,26 @@ static void parseOBJFile(const std::string filePath, VertexData* vertData, Trian
 			tris_iterator = 0;
 
 			getline(stream, line, '\n');
-			std::strcpy((triMeshes + mesh_iterator)->name, line.c_str());		
+			std::strcpy((trimeshes + mesh_iterator)->name, line.c_str());		
 
 			continue;
 		}
+		if (line == "s")
+		{
+			getline(stream, line, '\n');
+			if (line.compare("off") != 0)
+			{
+				(trimeshes + mesh_iterator)->isSmooth = true;
+			}
+			continue;
+		}
+		//add scan line for material, grab the Material name and compare it to names in the material array, then link
 		getline(stream, line, '\n');
 	}
 	vertData->numOfVerts = vert_iterator;
 	numOfMeshes = mesh_iterator+1;
 	stream.close();
 }
-
-struct sphere
-{
-	glm::vec3 location;
-	float r;
-
-	__device__ sphere(float x, float y, float z, float r)
-	{
-		location.x = x;
-		location.y = y;
-		location.z = z;
-		this->r = r;
-	};
-};
-
-struct pointLight
-{
-	glm::vec3 location;
-	glm::vec3 color;
-
-	float i; //intensity
-
-	__device__ pointLight(float x, float y, float z, float r, float g, float b, float intensity)
-	{
-		location.x = x;
-		location.y = y;
-		location.z = z;
-		color.x = r;
-		color.y = g;
-		color.z = b;
-		i = intensity;
-	};
-};
 
 /*
 __device__ inline float raySphere(glm::vec3 V, glm::vec3 W, sphere S) {
@@ -196,9 +226,15 @@ __device__ inline float rayHalfspace(glm::vec3 V, glm::vec3 W, glm::vec4 H) {
 	return -dot(V1, H) / dot(W0, H);
 }
 
-/* Return a point P if V, W intersects triangle ABC */
-__device__ inline bool triangleTest(glm::vec3 V, glm::vec3 W, glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 N, glm::vec3 &P)
+/* Return a point P if Ray V, W intersects triangle ABC */
+__device__ inline bool triangleTest(glm::vec3 V, glm::vec3 W, glm::vec3 a, glm::vec3 b, glm::vec3 c, float &u, float &v, glm::vec3 &P)
 {
+	//	 A
+	// B	C
+	//compute N in a counter clockwise manner, since the Vertex normals may not be flat shaded
+	glm::vec3 ab = b - a;
+	glm::vec3 ac = c - a;
+	glm::vec3 N = cross(ab, ac);
 	float d = -dot(N, a);
 	glm::vec4 H = glm::vec4(N.x, N.y, N.z, d);
 
@@ -211,57 +247,65 @@ __device__ inline bool triangleTest(glm::vec3 V, glm::vec3 W, glm::vec3 a, glm::
 		//calculate point p
 		glm::vec3 p = V + t * W;
 
+		float N2 = dot(N, N);
+
 		//make sure p is within the edges
-		glm::vec3 ab = b - a;
-		glm::vec3 ap = p - a;
-		if (dot(cross(ab, ap), N) < 0.f) // > 0 means inside, = 0 means on the edge
+		glm::vec3 vPerp = p - a;
+		if (dot(cross(ab, vPerp), N) < 0.f) // > 0 means inside, = 0 means on the edge
 		{
 			return false;
 		}
 
 		glm::vec3 bc = c - b;
-		glm::vec3 bp = p - b;
-		if (dot(cross(bc, bp), N) < 0.f)
+		vPerp = p - b;
+		if (u = dot(cross(bc, vPerp), N) < 0.f)
 		{
 			return false;
 		}
 
 		glm::vec3 ca = a - c;
-		glm::vec3 cp = p - c;
-		if (dot(cross(ca, cp), N) < 0.f)
+		vPerp = p - c;
+		if (v = dot(cross(ca, vPerp), N) < 0.f)
 		{
 			return false;
 		}
 
-		//TODO calculate the barycentric coordinates to apply smooth shading with vertex normals
+		u /= N2;
+		v /= N2;
 
-		//set values
+		//set return values
 		P = p;
 		return true;
 	}
 	return false;
 }
 
-/*Returns a point P of the closest triangle*/
+/*Returns a point P of the closest triangle along with the normal direction at point P for shading*/
 __device__ inline bool testTriangles(glm::vec3 V, glm::vec3 W, glm::vec3 &P, glm::vec3 &N, VertexData* vertData, TriangleMesh* trimesh, int numOfMeshes)
 {
 	bool hit = false;
 	float z = 1000.f;
+	int meshOffset = 0;
+	int triOffset = 0;
+	float u,v;
 
 	//loop through all triangles in the scene
 	for (int k = 0; k < numOfMeshes; k++)
 	{
 		for (int i = 0; i < trimesh->numOfTris; i++)
 		{
-			//vertex indexes begin at 1 for obj files, thus the -1
+			//note: vertex indexes begin at 1 for obj files, thus the -1
+			
+			//did we hit something?
 			if (triangleTest(V, W, *(vertData->verts + ((trimesh + k)->tris + i)->x - 1), *(vertData->verts + ((trimesh + k)->tris + i)->y - 1),
-				*(vertData->verts + ((trimesh + k)->tris + i)->z - 1), *(vertData->vnorms + ((trimesh + k)->tris + i)->vn1 - 1), P))
-			{ //Did we hit something?
-				//is this point closer to the camera? 
+				*(vertData->verts + ((trimesh + k)->tris + i)->z - 1), u, v, P))
+			{
 				float dist = glm::distance(V, P);
-				if (dist < z)
+				if (dist < z) //is this point closer to the camera? 
 				{
-					N = *(vertData->vnorms + ((trimesh + k)->tris + i)->vn1 - 1);
+					//save offsets to set normal data later
+					meshOffset = k;
+					triOffset = i;
 
 					//we are closer so update the z position
 					z = dist;
@@ -271,14 +315,33 @@ __device__ inline bool testTriangles(glm::vec3 V, glm::vec3 W, glm::vec3 &P, glm
 		}
 	}
 
+	//if the mesh is flat shading just pass in v1 vertex normal
+	//otherwise use u and v to calculate the smooth shaded normal at point P
+	if (hit)
+	{
+		if ((trimesh + meshOffset)->isSmooth)
+		{
+			N = (1 - u - v) * *(vertData->vnorms + ((trimesh + meshOffset)->tris + triOffset)->vn1 - 1)
+			+ u * *(vertData->vnorms + ((trimesh + meshOffset)->tris + triOffset)->vn2 - 1)
+			+ v * *(vertData->vnorms + ((trimesh + meshOffset)->tris + triOffset)->vn3 - 1);
+		}
+		else
+		{
+			N = *(vertData->vnorms + ((trimesh + meshOffset)->tris + triOffset)->vn1 - 1);
+		}
+		//TODO: Calculate Texture coordinates
+	}
+
 	//shade the closest point if we hit something
 	return hit;
 }
 
-/*Returns true if any triangle is hit*/
+/*Returns true if any triangle is hit, no shading information*/
 __device__ inline bool testTrianglesAny(glm::vec3 V, glm::vec3 W, VertexData* vertData, TriangleMesh* trimesh, int numOfMeshes)
 {
+	//dummy variables
 	glm::vec3 P;
+	float u, v; 
 
 	//loop through all triangles in the scene
 	for (int k = 0; k < numOfMeshes; k++)
@@ -287,7 +350,7 @@ __device__ inline bool testTrianglesAny(glm::vec3 V, glm::vec3 W, VertexData* ve
 		{
 			//vertex indexes begin at 1 for obj files, thus the -1
 			if (triangleTest(V, W, *(vertData->verts + ((trimesh + k)->tris + i)->x - 1), *(vertData->verts + ((trimesh + k)->tris + i)->y - 1),
-				*(vertData->verts + ((trimesh + k)->tris + i)->z - 1), *(vertData->vnorms + ((trimesh + k)->tris + i)->vn1 - 1), P))
+				*(vertData->verts + ((trimesh + k)->tris + i)->z - 1), u, v, P))
 			{ //Did we hit something?
 				return true;
 			}
@@ -295,11 +358,12 @@ __device__ inline bool testTrianglesAny(glm::vec3 V, glm::vec3 W, VertexData* ve
 	}
 
 	return false;
-}
+} //this needs to be adjusted to account for objects behind the light
 
 __device__ glm::vec3 shadePoint(glm::vec3 P, glm::vec3 W, glm::vec3 N, VertexData* vertData, TriangleMesh* trimesh, material* m, pointLight* lights, int num_lights, int numOfMeshes)
 {
 	glm::vec3 c = glm::vec3(0.f);
+
 	for (int l = 0; l < num_lights; l++)
 	{
 		glm::vec3 contribution = glm::vec3(0.f);
@@ -439,7 +503,7 @@ __device__ inline glm::vec3 shadePoint(const Camera &camera, const float pixel_x
 
 	// TEMP DEFINE LIGHT DATA
 	const int num_lights = 2;
-	pointLight lights[num_lights] = { pointLight(0.5f, 5.5f, -5.5f, .59f, .93f, .59f, 25.f), pointLight(1.5f, -.5f, -1.5f, .19f, .63f, .49f, 3.f) };
+	pointLight lights[num_lights] = { pointLight(0.5f, 5.5f, -5.5f, .59f, .93f, .59f, 25.f), pointLight(.43f, .15f, -4.2f, .19f, .63f, .49f, 3.f) };
 	// TEMP DEFINE MATERIAL DATA
 	material sphere_mat = material(0.1f, 0.1f, 0.1f, 0.2f, 0.4f, 0.5f, 1.f, 1.f, 1.f, 1.5f);
 
@@ -526,7 +590,7 @@ int main()
 	//Read in Triangle information from OBJ file
 	TriangleMesh* trimeshes;
 	VertexData* vertData;
-	const int maxMeshes = 3;
+	const int maxMeshes = 5;
 	const int maxVertices = 300; //For the entire scene
 	const int maxFaces = 300; //Per object
 	
