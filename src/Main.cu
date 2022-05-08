@@ -336,12 +336,12 @@ __device__ inline bool testTriangles(glm::vec3 V, glm::vec3 W, glm::vec3 &P, glm
 	return hit;
 }
 
-/*Returns true if any triangle is hit, no shading information*/
-__device__ inline bool testTrianglesAny(glm::vec3 V, glm::vec3 W, VertexData* vertData, TriangleMesh* trimesh, int numOfMeshes)
+/*Returns true if any triangle is hit from V to d*/
+__device__ inline bool testTrianglesAny(glm::vec3 V, glm::vec3 W, float d, VertexData* vertData, TriangleMesh* trimesh, int numOfMeshes)
 {
 	//dummy variables
 	glm::vec3 P;
-	float u, v; 
+	float u, v;
 
 	//loop through all triangles in the scene
 	for (int k = 0; k < numOfMeshes; k++)
@@ -349,16 +349,21 @@ __device__ inline bool testTrianglesAny(glm::vec3 V, glm::vec3 W, VertexData* ve
 		for (int i = 0; i < trimesh->numOfTris; i++)
 		{
 			//vertex indexes begin at 1 for obj files, thus the -1
+			//Did we hit something?
 			if (triangleTest(V, W, *(vertData->verts + ((trimesh + k)->tris + i)->x - 1), *(vertData->verts + ((trimesh + k)->tris + i)->y - 1),
 				*(vertData->verts + ((trimesh + k)->tris + i)->z - 1), u, v, P))
-			{ //Did we hit something?
-				return true;
+			{
+				//is it between V and d ?
+				if (length(P - V) <= d)
+				{
+					return true;
+				}
 			}
 		}
 	}
 
 	return false;
-} //this needs to be adjusted to account for objects behind the light
+}
 
 __device__ glm::vec3 shadePoint(glm::vec3 P, glm::vec3 W, glm::vec3 N, VertexData* vertData, TriangleMesh* trimesh, material* m, pointLight* lights, int num_lights, int numOfMeshes)
 {
@@ -371,22 +376,22 @@ __device__ glm::vec3 shadePoint(glm::vec3 P, glm::vec3 W, glm::vec3 N, VertexDat
 		//calculate the light direction from the point lamps
 		glm::vec3 Ld = (lights + l)->location - P;
 		float distance = length(Ld);
-		distance = distance * distance;
+		float distance2 = distance * distance;
 		Ld = normalize(Ld);
 
 		// TODO: shadows for all surfaces
-
+		/*
 		//shadows from other triangles
 		//trace from the point back to the light, is another triangle in the way?
-		if (testTrianglesAny(P, Ld, vertData, trimesh, numOfMeshes))
+		if (testTrianglesAny(P, Ld, distance, vertData, trimesh, numOfMeshes))
 		{
 			continue;
-		}
+		}*/
 
 		glm::vec3 Rd = 2.f * N * dot(N, Ld) - Ld;
 		contribution += (lights + l)->color * m->diffuse * glm::max(0.f, dot(N, Ld));
 		contribution += m->specular * pow(glm::max(0.f, dot(Rd, -W)), m->power);
-		contribution *= (lights + l)->i / distance;
+		contribution *= (lights + l)->i / distance2;
 		c += contribution;
 	}
 
@@ -415,6 +420,7 @@ struct Camera
 	//set the film size
 	const float image_plane_width = 0.07f; // 7cm
 	const float image_plane_height = 0.06f; // 6cm
+	//const int iso = 400;
 
 	//select a focal length, aperature, and focus distance
 	const float focal_length = 0.05f; // 50mm
@@ -522,52 +528,43 @@ __global__ void shadePixels(glm::vec3* pixelptr, VertexData* vertData, TriangleM
 {
 	int pixel_x = threadIdx.x;
 	int pixel_y = blockIdx.x;
+	int tid = (pixel_y * blockDim.x) + pixel_x;
 
 	//pixels are stored colunm/block num by row/thread offset
 	//-----------------------------
 	//---------------x-------------
 	//-----------------------------
-	pixelptr = pixelptr + (pixel_y * blockDim.x) + pixel_x;
+	pixelptr = pixelptr + tid;
 
 	Camera camera;
 
-	const int num_pixel_samples = 4; //must be divisible by 2
+	//a pixel is a 1 by 1 unit until it get converted to camera space
+	//SET PIXEL SAMPLES HERE
+	const int num_pixel_samples = 3; //this number will be squared
 
-	//curandState_t state;
+	int cell_size = 1 / num_pixel_samples;
 
+	curandState_t state;
+	curand_init(2127 + tid, tid, 0, &state);
 	glm::vec3 color = glm::vec3(0.);
 
 	for (int i = 0; i < num_pixel_samples; i++)
 	{
-		//TODO: divide the pixel further into cells
-		/*for (int j = 0; j < num_pixel_samples; j++)
+		//divide the pixel further into cells
+		//Choose a random point from wihtin each cell
+		for (int j = 0; j < num_pixel_samples; j++)
 		{
-			color += shadePoint(camera, pixel_x + (1 / num_pixel_samples) * i + (1 / (num_pixel_samples * 2)), 
-			pixel_y + (1 / num_pixel_samples) * j + (1 / (num_pixel_samples * 2)), trimesh);
-		}*/
-		
-		//this takes samples in an x pattern
-		float rand_x, rand_y;
-		if (i < num_pixel_samples/2)
-		{
-			rand_x = pixel_x + 1 / num_pixel_samples * i;
-			rand_y = pixel_y + 1 / num_pixel_samples * i;
-		}
-		else
-		{
-			rand_x = (pixel_x + 1) - 1 / num_pixel_samples * i;
-			rand_y = pixel_y + 1 / num_pixel_samples * i;
-		}
-		color += shadePoint(camera, rand_x,	rand_y, vertData, trimesh, numOfMeshes);
+			float rand_x = pixel_x + cell_size * i + curand_uniform(&state);
+			float rand_y = pixel_y + cell_size * j + curand_uniform(&state);
 
-		//select a random point within the interval
-		//curand_init(2127+i, (blockDim.x * pixel_y + pixel_x), 0, &state);
-		//float rand_x = pixel_x + curand_uniform(&state) * pixel_width;
-		//float rand_y = pixel_y + curand_uniform(&state) * pixel_height;
+			color += shadePoint(camera, rand_x, rand_y, vertData, trimesh, numOfMeshes);
+		}	
 	}
 
 	//average the pixel sample colors
-	color /= num_pixel_samples;
+	color /= (num_pixel_samples * num_pixel_samples);
+
+	//color = shadePoint(camera, pixel_x, pixel_y, vertData, trimesh, numOfMeshes);
 
 	//Set the final color
 	pixelptr->r = glm::clamp(color.x * 255.f, 0.f, 255.f);
@@ -575,6 +572,14 @@ __global__ void shadePixels(glm::vec3* pixelptr, VertexData* vertData, TriangleM
 	pixelptr->b = glm::clamp(color.z * 255.f, 0.f, 255.f);
 
 }
+
+//__global__ void genRand(float *a)
+//{
+//	curandState_t state;
+//	curand_init(2777, threadIdx.x, 0, &state);
+//	a[threadIdx.x] = curand_uniform(&state);
+//	a[threadIdx.x+5] += curand_uniform(&state);
+//}
 
 int main()
 {
@@ -586,6 +591,20 @@ int main()
 
 	cudaMallocManaged(&pixels, sizeof(glm::vec3) * image_width * image_height);
 
+	//RANDOM TESTING
+	//float *a;
+	//cudaMallocManaged(&a, sizeof(float) * 10);
+
+	//genRand <<<1, 5>>> (a);
+
+	//cudaDeviceSynchronize();
+
+	//curandGenerator_t gen;
+	//curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_MTGP32);
+	//curandSetPseudoRandomGeneratorSeed(gen, 1234ULL);
+	//curandGenerateUniform(gen, a, 10);
+
+	//cudaDeviceSynchronize();
 	
 	//Read in Triangle information from OBJ file
 	TriangleMesh* trimeshes;
@@ -665,7 +684,6 @@ int main()
 
 	for (int i = 0; i < maxMeshes; i++)
 	{
-		
 		cudaFree((trimeshes + i)->tris);
 	}
 	cudaFree(trimeshes);
