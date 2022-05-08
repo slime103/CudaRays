@@ -354,7 +354,8 @@ __device__ inline bool testTrianglesAny(glm::vec3 V, glm::vec3 W, float d, Verte
 				*(vertData->verts + ((trimesh + k)->tris + i)->z - 1), u, v, P))
 			{
 				//is it between V and d ?
-				if (length(P - V) <= d)
+				float dist = length(P - V);
+				if (dist <= d && dist > 0.000001) //triangle should not be clipping
 				{
 					return true;
 				}
@@ -380,13 +381,13 @@ __device__ glm::vec3 shadePoint(glm::vec3 P, glm::vec3 W, glm::vec3 N, VertexDat
 		Ld = normalize(Ld);
 
 		// TODO: shadows for all surfaces
-		/*
+		
 		//shadows from other triangles
 		//trace from the point back to the light, is another triangle in the way?
 		if (testTrianglesAny(P, Ld, distance, vertData, trimesh, numOfMeshes))
 		{
 			continue;
-		}*/
+		}
 
 		glm::vec3 Rd = 2.f * N * dot(N, Ld) - Ld;
 		contribution += (lights + l)->color * m->diffuse * glm::max(0.f, dot(N, Ld));
@@ -424,15 +425,16 @@ struct Camera
 
 	//select a focal length, aperature, and focus distance
 	const float focal_length = 0.05f; // 50mm
-	const float aperture = 16.0f; // f16
-	const float focus_dist = 3.f; // 3m
+	const float aperture = 16.f; // f1.7
+	const float focus_dist = 2.5f; // 2.5m
+	const float lens_diameter = focal_length / aperture;
 };
 
 //Returns a point on a concentric disk, takes x and y values between -1 and 1
 __device__ inline void sampleDisk(float &x, float &y)
 {
-	static const float PiOver2 = 1.570796326794896619231321691639;
-	static const float PiOver4 = 0.785398163397448309615660845819;
+	__constant__ static const float PiOver2 = 1.570796326794896619231321691639;
+	__constant__ static const float PiOver4 = 0.785398163397448309615660845819;
 
 	float theta, r;
 
@@ -450,45 +452,39 @@ __device__ inline void sampleDisk(float &x, float &y)
 	x = r * cos(theta);
 	y = r * sin(theta);
 }
-/*
+
+//remaps 0-1 values
+__device__ inline void remap(float &val, float min, float max)
+{
+	val *= (max - min) + min;
+}
+
 //Takes a ray, V, W, and returns a new ray direction using a lens sample point
-__device__ inline void dofRay(glm::vec3 &V, glm::vec3 &W, const Camera& camera)
+__device__ inline void dofRay(glm::vec3 &V, glm::vec3 &W, const Camera& camera, curandState_t* state)
 {
 	//Sample a point on a disk, SP (sample point)
-	float x, y, z;
+	float x, y;
 
-	x = SimplexNoise::noise((float) blockDim.x * blockIdx.x + threadIdx.x);
-	y = SimplexNoise::noise((float) gridDim.x * blockIdx.x + threadIdx.x);
-	z = SimplexNoise::noise(gridDim.x + (float) blockIdx.x * threadIdx.x);
-
-	if (z > -0.5f)
-	{
-		x = -x;
-	}
-	else if (z > 0.f)
-	{
-		y = -y;
-	}
-	else if (z > 0.5f)
-	{
-		x = -x;
-		y = -y;
-	}
+	x = curand_uniform(state);
+	y = curand_uniform(state);
+	remap(x, -1.f, 1.f);
+	remap(y, -1.f, 1.f);
 
 	sampleDisk(x, y);
 
 	//Convert unit disk coordinates to lens diameter, LP (lens point)
-	V.x = x * camera.focal_length / camera.aperture;
-	V.y = y * camera.focal_length / camera.aperture;
+	V.x = x * camera.lens_diameter;
+	V.y = y * camera.lens_diameter;
 
 	//calculate the focal point by scaling the primary ray and adding it to the ray origin position
 	glm::vec3 focalPoint = V + (W * camera.focus_dist);
 
 	//Construct a unit vector from the sample point to the focal point, FD (focal direction)
 	W = normalize(focalPoint - V);
-}*/
+}
 
-__device__ inline glm::vec3 shadePoint(const Camera &camera, const float pixel_x, const float pixel_y, VertexData* vertData, TriangleMesh* trimesh, int numOfMeshes)
+__device__ inline glm::vec3 
+shadePoint(const Camera &camera, const float pixel_x, const float pixel_y, VertexData* vertData, TriangleMesh* trimesh, int numOfMeshes, curandState_t* state)
 {
 	//find this pixel's camera space position
 	glm::vec3 pixelpos;
@@ -502,14 +498,14 @@ __device__ inline glm::vec3 shadePoint(const Camera &camera, const float pixel_x
 	glm::vec3 V = glm::vec3(0.f, 0.f, camera.focal_length);
 	glm::vec3 W = glm::vec3(V.x + pixelpos.x, V.y + pixelpos.y, -1.f * V.z);
 
-	//dofRay(V, W, camera);
+	dofRay(V, W, camera, state);
 
 	//set the background color
 	glm::vec3 color = glm::vec3(0.6f, 0.8f, 0.8f);
 
 	// TEMP DEFINE LIGHT DATA
 	const int num_lights = 2;
-	pointLight lights[num_lights] = { pointLight(0.5f, 5.5f, -5.5f, .59f, .93f, .59f, 25.f), pointLight(.43f, .15f, -4.2f, .19f, .63f, .49f, 3.f) };
+	pointLight lights[num_lights] = { pointLight(0.5f, 5.5f, -5.5f, .59f, .93f, .59f, 25.f), pointLight(.43f, .15f, -4.2f, .19f, .63f, .49f, 1.f) };
 	// TEMP DEFINE MATERIAL DATA
 	material sphere_mat = material(0.1f, 0.1f, 0.1f, 0.2f, 0.4f, 0.5f, 1.f, 1.f, 1.f, 1.5f);
 
@@ -557,7 +553,7 @@ __global__ void shadePixels(glm::vec3* pixelptr, VertexData* vertData, TriangleM
 			float rand_x = pixel_x + cell_size * i + curand_uniform(&state);
 			float rand_y = pixel_y + cell_size * j + curand_uniform(&state);
 
-			color += shadePoint(camera, rand_x, rand_y, vertData, trimesh, numOfMeshes);
+			color += shadePoint(camera, rand_x, rand_y, vertData, trimesh, numOfMeshes, &state);
 		}	
 	}
 
